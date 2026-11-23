@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Run starcross inside the toolchain image with whichever container engine is installed.
+#
+#   bin/starcross-container build            # build the image (slow the first time: clspv + LLVM)
+#   bin/starcross-container convert x.cu     # anything else is passed to `starcross` in the container
+#   bin/starcross-container shell            # interactive shell in the image
+#   bin/starcross-container engine           # print the engine that would be used
+#
+# Engine: $STARCROSS_ENGINE if set (podman|docker|any docker-compatible CLI), else podman, else docker.
+# Image:  $STARCROSS_IMAGE (default ghcr.io/pdubz3r0/starcross-toolchain:latest). If it isn't
+#         present locally it's pulled; `build` tags its result with the same name.
+# The current directory is mounted at /work, so pass paths relative to it.
+set -euo pipefail
+
+here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+repo="$(dirname "$here")"
+image="${STARCROSS_IMAGE:-ghcr.io/pdubz3r0/starcross-toolchain:latest}"
+
+pick_engine() {
+    if [[ -n "${STARCROSS_ENGINE:-}" ]]; then
+        command -v "$STARCROSS_ENGINE" >/dev/null || {
+            echo "starcross-container: STARCROSS_ENGINE=$STARCROSS_ENGINE not found" >&2; exit 127; }
+        echo "$STARCROSS_ENGINE"; return
+    fi
+    for e in podman docker; do
+        command -v "$e" >/dev/null && { echo "$e"; return; }
+    done
+    echo "starcross-container: neither podman nor docker is installed (or set STARCROSS_ENGINE)" >&2
+    exit 127
+}
+
+engine="$(pick_engine)"
+
+# `docker` is sometimes podman-docker's shim; treat it as podman for user mapping.
+is_podman() { [[ "$(basename "$engine")" == podman* ]] || "$engine" --version 2>/dev/null | grep -qi podman; }
+
+run_args=(run --rm -v "$PWD":/work:Z -w /work)
+[[ -t 0 && -t 1 ]] && run_args+=(-it)
+if ! is_podman; then
+    # Docker runs as root by default; run as the caller so outputs aren't root-owned.
+    # (Rootless podman already maps container root to the caller.)
+    run_args+=(--user "$(id -u):$(id -g)" -e HOME=/tmp)
+fi
+
+ensure_image() {
+    "$engine" image inspect "$image" >/dev/null 2>&1 && return
+    echo "starcross-container: '$image' not found locally, pulling..." >&2
+    "$engine" pull "$image" >&2 || {
+        echo "starcross-container: pull failed; build it locally with: $0 build" >&2
+        exit 1
+    }
+}
+
+case "${1:-}" in
+    engine)
+        echo "$engine"
+        ;;
+    build)
+        shift
+        exec "$engine" build -f "$repo/Containerfile" -t "$image" "$@" "$repo"
+        ;;
+    shell)
+        shift
+        ensure_image
+        exec "$engine" "${run_args[@]}" --entrypoint /bin/bash "$image" "$@"
+        ;;
+    *)
+        ensure_image
+        exec "$engine" "${run_args[@]}" "$image" "$@"
+        ;;
+esac

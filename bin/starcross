@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+"""starcross launcher: works from a checkout or when installed to /opt/starcross."""
+import os
+import sys
+
+here = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, os.path.dirname(here))
+from starcross.cli import main  # noqa: E402
+
+sys.exit(main())
